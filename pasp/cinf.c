@@ -11,8 +11,12 @@ double prob_total_choice_prob(program_t *P, total_choice_t *theta) {
   for (; i < PF_n; ++i) {
     t = bitvec_GET(&theta->pf, i + CF_n);
     p *= t*PF[i].p + (!t)*(1.0-PF[i].p);
+    if (p == 0.0) return 0.0;
   }
-  for (i = 0; i < AD_n; ++i) p *= P->AD[i].P[theta->theta_ad[i]];
+  for (i = 0; i < AD_n; ++i) {
+    p *= P->AD[i].P[theta->theta_ad[i]];
+    if (p == 0.0) return 0.0;
+  }
   return p;
 }
 double prob_total_choice_neural(program_t *P, total_choice_t *theta, size_t offset, bool train) {
@@ -21,19 +25,24 @@ double prob_total_choice_neural(program_t *P, total_choice_t *theta, size_t offs
   size_t m = train*P->batch + (!train)*P->m_test;
   for (size_t i = 0; i < P->NR_n; ++i) {
     float *prob = P->NR[i].P + offset*P->NR[i].o;
+    size_t stride = P->NR[i].o*m;
     for (size_t j = 0; j < P->NR[i].n; ++j)
       for (size_t o = 0; o < P->NR[i].o; ++o) {
         bool t = bitvec_GET(&theta->pf, r++);
-        double q = prob[j*P->NR[i].o*m+o];
+        double q = prob[j*stride+o];
         p *= t*q + (!t)*(1.0-q);
+        if (p == 0.0) return 0.0;
       }
   }
   r = P->AD_n;
   for (size_t i = 0; i < P->NA_n; ++i) {
     float *prob = P->NA[i].P + offset*P->NA[i].v*P->NA[i].o;
+    size_t vo = P->NA[i].v*P->NA[i].o;
     for (size_t j = 0; j < P->NA[i].n; ++j)
-      for (size_t o = 0; o < P->NA[i].o; ++o)
-        p *= prob[j*m*P->NA[i].v*P->NA[i].o + o*P->NA[i].v + theta->theta_ad[r++]];
+      for (size_t o = 0; o < P->NA[i].o; ++o) {
+        p *= prob[j*m*vo + o*P->NA[i].v + theta->theta_ad[r++]];
+        if (p == 0.0) return 0.0;
+      }
   }
   return p;
 }
@@ -46,6 +55,7 @@ double prob_total_choice_ground(array_prob_fact_t *PF, total_choice_t *theta) {
   for (size_t i = 0; i < PF->n; ++i) {
     t = bitvec_GET(&theta->pf, i);
     p *= t*PF->d[i].p + (!t)*(1.0-PF->d[i].p);
+    if (p == 0.0) return 0.0;
   }
   return p;
 }
@@ -103,7 +113,7 @@ nomem:
   free(*cond_1); free(*cond_2);
   free(*cond_3); free(*cond_4);
   *cond_1 = *cond_2 = *cond_3 = *cond_4 = NULL;
-  goto nomem;
+  return false;
 }
 
 bool setup_counts(size_t **count_q_e, size_t **count_e, size_t **count_partial_q_e, size_t n) {

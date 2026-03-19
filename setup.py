@@ -34,7 +34,7 @@ def check_environment_vars(macros: list) -> dict:
 STD_MACROS = check_environment_vars(
   [("NUM_PROCS", str(nproc-1 if (nproc := os.cpu_count()) > 1 else nproc)), ("_GNU_SOURCE", None)]
 )
-EXTRA_COMPILE_FLAGS = ["-Wno-unused-function", "-std=c11"]
+EXTRA_COMPILE_FLAGS = ["-Wno-unused-function", "-std=c11", "-O2"]
 
 exact    = Extension("exact",
                      libraries = ["m", "clingo", "pthread"],

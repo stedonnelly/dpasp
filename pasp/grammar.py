@@ -5,6 +5,15 @@ from .program import ProbFact, Query, VarQuery, ProbRule, Program, CredalFact, u
   Semantics, Data
 from .program import AnnotatedDisjunction, NeuralRule, NeuralAD, unique_pgrule_id
 
+_parse_term_cache = {}
+def _cached_parse_term_rep(s: str) -> int:
+  "Cached version of clingo.parse_term(s)._rep to avoid redundant parsing."
+  r = _parse_term_cache.get(s)
+  if r is None:
+    r = clingo.parse_term(s)._rep
+    _parse_term_cache[s] = r
+  return r
+
 def read(*files: str, G: lark.Lark = None, from_str: bool = False, start = "plp") -> lark.Tree:
   "Read all `files` and parse them with grammar `G`, returning a single `lark.Tree`."
   if G is None:
@@ -26,7 +35,8 @@ def read(*files: str, G: lark.Lark = None, from_str: bool = False, start = "plp"
         if T is None: T = G.parse(text)
         else:
           U = G.parse(text)
-          T.children.extend(u for u in U.children if u not in T.children)
+          seen = set(id(c) for c in T.children)
+          T.children.extend(u for u in U.children if id(u) not in seen)
     except Exception as ex:
       raise ex
   assert T is not None, "No file read."
@@ -122,7 +132,7 @@ class StableTransformer(lark.Transformer):
     else:
       if O is None: S = [f"{name}({t.arg}, {v})" for t in T for v in V]
       else: S = [f"{name}({t.arg}, {v}, {o})" for t in T for o in O for v in V]
-    g = (clingo.parse_term(s)._rep for s in S)
+    g = (_cached_parse_term_rep(s) for s in S)
     return contiguous(tuple(g), dtype=numpy.uint64), S
 
   @staticmethod
@@ -135,8 +145,8 @@ class StableTransformer(lark.Transformer):
       if len(body) > 1:
         # B and S do not depend on the number of outcomes |O|, only on |t| and |body|.
         body_no_data = [b for b in body if b[2][1] != t[0].name]
-        B = contiguous(tuple(clingo.parse_term(f"{b[2][1]}({t[i].arg})" if len(b[3]) > 0 \
-                                                else lit2atom(b[1]))._rep for i in range(len(t)) \
+        B = contiguous(tuple(_cached_parse_term_rep(f"{b[2][1]}({t[i].arg})" if len(b[3]) > 0 \
+                                                else lit2atom(b[1])) for i in range(len(t)) \
                               for b in body_no_data), dtype = numpy.uint64)
         S = contiguous(tuple(b[2][0] for i in range(len(t)) for b in body_no_data), dtype = bool)
       NR.append(NeuralRule(H, B, S, name, net, rep, t, learnable, params, O))
@@ -152,8 +162,8 @@ class StableTransformer(lark.Transformer):
       if len(body) > 1:
         body_no_data = [b for b in body if b[2][1] != t[0].name]
         # B and S do not depend on the number of values |V| or outcomes |O|, only on |t| and |body|.
-        B = contiguous(tuple(clingo.parse_term(f"{b[2][1]}({t[i].arg})" if len(b[3]) > 0 \
-                                                else lit2atom(b[1]))._rep for i in range(len(t)) \
+        B = contiguous(tuple(_cached_parse_term_rep(f"{b[2][1]}({t[i].arg})" if len(b[3]) > 0 \
+                                                else lit2atom(b[1])) for i in range(len(t)) \
                               for b in body_no_data), dtype = numpy.uint64)
         S = contiguous(tuple(b[2][0] for i in range(len(t)) for b in body_no_data), dtype = bool)
       NA.append(NeuralAD(H, B, S, name, V, net, rep, t, learnable, params, O, H_s))
@@ -671,7 +681,8 @@ def _flatten_includes(*files: str, G: lark.Lark = None, from_str: bool = False) 
     _sem, _consts, includes = transf.transform(_T)
     if _sem is not None: sem = _sem
     consts.update(_consts)
-    T.children.extend(u for u in _T.children if u not in T.children)
+    seen = set(id(c) for c in T.children)
+    T.children.extend(u for u in _T.children if id(u) not in seen)
     to_parse = includes.difference(_files)
     _files.update(includes)
   return sem, consts, T
