@@ -1,0 +1,159 @@
+name: Build and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist
+        run: python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          # ---- Target platforms ----
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_MACOS: "${{ matrix.arch }}"
+
+          # ---- Linux: build clingo from source in manylinux container ----
+          CIBW_BEFORE_ALL_LINUX: |
+            yum install -y cmake gcc gcc-c++ bison re2c
+            cd /tmp
+            curl -L https://github.com/potassco/clingo/archive/refs/tags/v5.7.1.tar.gz -o clingo.tar.gz
+            tar xzf clingo.tar.gz
+            cd clingo-5.7.1
+            cmake -H. -Bbuild \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCLINGO_BUILD_WITH_PYTHON=OFF \
+              -DCLINGO_BUILD_WITH_LUA=OFF \
+              -DCMAKE_INSTALL_PREFIX=/usr/local
+            cmake --build build --target install -j$(nproc)
+            ldconfig
+
+          CIBW_ENVIRONMENT_LINUX: >
+            CFLAGS="-I/usr/local/include"
+            LDFLAGS="-L/usr/local/lib -L/usr/local/lib64"
+            LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64"
+
+          # ---- macOS: build clingo from source ----
+          CIBW_BEFORE_ALL_MACOS: |
+            brew install cmake bison re2c
+            cd /tmp
+            curl -L https://github.com/potassco/clingo/archive/refs/tags/v5.7.1.tar.gz -o clingo.tar.gz
+            tar xzf clingo.tar.gz
+            cd clingo-5.7.1
+            cmake -H. -Bbuild \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCLINGO_BUILD_WITH_PYTHON=OFF \
+              -DCLINGO_BUILD_WITH_LUA=OFF \
+              -DCMAKE_INSTALL_PREFIX=/usr/local
+            cmake --build build --target install -j$(sysctl -n hw.ncpu)
+
+          CIBW_ENVIRONMENT_MACOS: >
+            CFLAGS="-I/usr/local/include"
+            LDFLAGS="-L/usr/local/lib"
+
+          # ---- Common: Python build deps ----
+          CIBW_BEFORE_BUILD: "pip install numpy setuptools"
+
+          # ---- Repair: bundle shared libs into wheel ----
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+
+          # ---- Test: basic smoke test ----
+          CIBW_TEST_REQUIRES: "clingo numpy lark pandas"
+          CIBW_TEST_COMMAND: "python -c 'import pasp; print(pasp.__version__)'"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: ./wheelhouse/*.whl
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-22.04
+    if: contains(github.ref, '-dev') || contains(github.ref, 'rc')
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/pasp-plp-uas
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Rename packages for TestPyPI
+        run: |
+          cd dist
+          for f in *pasp_plp*; do
+            mv "$f" "$(echo $f | sed 's/pasp_plp/pasp_plp_uas/g')"
+          done
+          ls -la
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-22.04
+    if: "!contains(github.ref, '-dev') && !contains(github.ref, 'rc')"
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pasp-plp
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
