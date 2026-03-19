@@ -1,4 +1,5 @@
 #include "coptimize.h"
+#include <pthread.h>
 
 /* The polynomial to evaluate, where X are the variables, S are the signs of each factor, C are the
  * coefficients, n are the number of terms and m are the number of variables. For example, the
@@ -30,34 +31,77 @@ double f(double *X, bool *S, double *C, size_t n, size_t m) {
   return s;
 }
 
-#define OPTIMIZE_BFCA     0
-#define OPTIMIZE_BF       1
-#define OPTIMIZE_BFCA_SMP 2
-#define OPTIMIZE_BF_SMP   3
+#define BFCA_MAX_M 64
 
-#define OPTIMIZE_IS_BF(x)      (x) & 1
-#define OPTIMIZE_IS_BFCA(x)    !(OPTIMIZE_IS_BF(x))
-#define OPTIMIZE_IS_SMP(x)     (x) & 2
-#define OPTIMIZE_IS_NOT_SMP(x) !(OPTIMIZE_IS_SMP(x))
+/* ---- Parallel brute-force infrastructure ---- */
 
-#define BFCA_MAXIMIZE -1
-#define BFCA_MINIMIZE 1
+typedef struct {
+  bool *S_a, *S_b;
+  double *C_a, *C_b, *L, *U;
+  size_t n_a, n_b, m;
+  unsigned long long start, end;
+  double low, up;
+  bool smp;
+} bf_task_t;
+
+typedef struct {
+  bool *S_a, *S_b, *S_c, *S_d;
+  double *C_a, *C_b, *C_c, *C_d, *L, *U;
+  size_t n_a, n_b, n_c, n_d, m;
+  unsigned long long start, end;
+  double low, up;
+} bf_minmax_task_t;
+
+static void *bf_worker(void *arg) {
+  bf_task_t *t = (bf_task_t *)arg;
+  double X[BFCA_MAX_M];
+  size_t m = t->m;
+  t->low = 1.0; t->up = 0.0;
+  for (unsigned long long i = t->start; i < t->end; ++i) {
+    for (size_t j = 0; j < m; ++j) X[j] = ((i >> j) & 1) ? t->L[j] : t->U[j];
+    double a = f(X, t->S_a, t->C_a, t->n_a, m);
+    double b = f(X, t->S_b, t->C_b, t->n_b, m);
+    if (t->smp) {
+      if (t->low > a) t->low = a;
+      if (t->up < b) t->up = b;
+    } else {
+      double y = a + b;
+      if (y != 0) y = a / y;
+      if (t->low > y) t->low = y;
+      if (t->up < y) t->up = y;
+    }
+  }
+  return NULL;
+}
+
+static void *bf_minmax_worker(void *arg) {
+  bf_minmax_task_t *t = (bf_minmax_task_t *)arg;
+  double X[BFCA_MAX_M];
+  size_t m = t->m;
+  t->low = 1.0; t->up = 0.0;
+  for (unsigned long long i = t->start; i < t->end; ++i) {
+    for (size_t j = 0; j < m; ++j) X[j] = ((i >> j) & 1) ? t->L[j] : t->U[j];
+    double a = f(X, t->S_a, t->C_a, t->n_a, m);
+    double b = f(X, t->S_b, t->C_b, t->n_b, m);
+    double c = f(X, t->S_c, t->C_c, t->n_c, m);
+    double d = f(X, t->S_d, t->C_d, t->n_d, m);
+    double y = a + d;
+    if (y != 0) y = a / y;
+    double z = b + c;
+    if (z != 0) z = b / z;
+    if (t->low > y) t->low = y;
+    if (t->up < z) t->up = z;
+  }
+  return NULL;
+}
+
+/* ---- Original serial versions ---- */
 
 #define bfca_min(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, tries, smp) \
   bfca(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, BFCA_MINIMIZE, tries, smp)
 #define bfca_max(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, tries, smp) \
   bfca(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, BFCA_MAXIMIZE, tries, smp)
 
-/* Brute-force coordinate descent.
- *
- * Array X are the coordinates to optimize, S_i, C_i, n_i, m - where i ∈ {a, b} are the polynomials
- * that compose the objective function g(X)=a(X)/(a(X)+b(X)) to be optimized, L and U are the lower
- * and upper probabilities respectively of the credal facts. Integer maxmin ∈ {-1, 1} and defines
- * whether to minimize or maximize the objective function (prefer BFCA_MINIMIZE and BFCA_MAXIMIZE
- * instead). Parameter tries tells the algorithm how many initialization resets are to be tried
- * for finding possibly global optima, and smp determines (if true) that the function should
- * override the objective function with g(X)=a(X).
- */
 double bfca(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L, double *U,
     size_t n_a, size_t n_b, size_t m, int maxmin, size_t tries, bool smp) {
   double est, lest, best = 1;
@@ -102,15 +146,6 @@ double bfca(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L
   return maxmin*best;
 }
 
-/* Brute-force.
- *
- * Array X are the coordinates to optimize, S_i, C_i, n_i, m - where i ∈ {a, b} are the polynomials
- * that compose the objective function g(X)=a(X)/(a(X)+b(X)) to be optimized, L and U are the lower
- * and upper probabilities respectively of the credal facts. Parameter low and up are pointers to
- * where the function should store the minimized and maximized values. This function is constrained
- * over 1 ≤ m ≤ 30 (any call above 30 would end up taking too long anyway). Parameter smp
- * determines (if true) that the function should override the objective function with g(X)=a(X)
- */
 void bf(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L, double *U,
     size_t n_a, size_t n_b, size_t m, double *low, double *up, bool smp) {
   size_t j;
@@ -134,6 +169,7 @@ void bf(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L, do
     }
   }
 }
+
 void bf_minmax(double *X, bool *S_a, bool *S_b, bool* S_c, bool* S_d, double *C_a,
     double *C_b, double *C_c, double *C_d, double *L, double *U, size_t n_a, size_t n_b,
     size_t n_c, size_t n_d, size_t m, double *low, double *up) {
@@ -155,5 +191,113 @@ void bf_minmax(double *X, bool *S_a, bool *S_b, bool* S_c, bool* S_d, double *C_
     if (z != 0) z = b/z;
     if (*low > y) *low = y;
     if (*up < z) *up = z;
+  }
+}
+
+/* ---- Parallel versions ---- */
+
+static void bf_parallel(bool *S_a, bool *S_b, double *C_a, double *C_b, double *L, double *U,
+    size_t n_a, size_t n_b, size_t m, double *low, double *up, bool smp, size_t num_threads) {
+  unsigned long long k = 1ULL << m;
+  if (num_threads > k) num_threads = k;
+  if (num_threads <= 1) {
+    double X[BFCA_MAX_M];
+    bf(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, low, up, smp);
+    return;
+  }
+
+  pthread_t threads[num_threads];
+  bf_task_t tasks[num_threads];
+
+  unsigned long long chunk = k / num_threads;
+  unsigned long long remainder = k % num_threads;
+  unsigned long long offset = 0;
+
+  for (size_t t = 0; t < num_threads; ++t) {
+    unsigned long long this_end = offset + chunk + (t < remainder ? 1 : 0);
+    tasks[t] = (bf_task_t){
+      .S_a = S_a, .S_b = S_b, .C_a = C_a, .C_b = C_b,
+      .L = L, .U = U, .n_a = n_a, .n_b = n_b, .m = m,
+      .start = offset, .end = this_end, .smp = smp
+    };
+    offset = this_end;
+    pthread_create(&threads[t], NULL, bf_worker, &tasks[t]);
+  }
+
+  *low = 1.0; *up = 0.0;
+  for (size_t t = 0; t < num_threads; ++t) {
+    pthread_join(threads[t], NULL);
+    if (tasks[t].low < *low) *low = tasks[t].low;
+    if (tasks[t].up > *up) *up = tasks[t].up;
+  }
+}
+
+static void bf_minmax_parallel(bool *S_a, bool *S_b, bool *S_c, bool *S_d,
+    double *C_a, double *C_b, double *C_c, double *C_d, double *L, double *U,
+    size_t n_a, size_t n_b, size_t n_c, size_t n_d, size_t m,
+    double *low, double *up, size_t num_threads) {
+  unsigned long long k = 1ULL << m;
+  if (num_threads > k) num_threads = k;
+  if (num_threads <= 1) {
+    double X[BFCA_MAX_M];
+    bf_minmax(X, S_a, S_b, S_c, S_d, C_a, C_b, C_c, C_d, L, U, n_a, n_b, n_c, n_d, m, low, up);
+    return;
+  }
+
+  pthread_t threads[num_threads];
+  bf_minmax_task_t tasks[num_threads];
+
+  unsigned long long chunk = k / num_threads;
+  unsigned long long remainder = k % num_threads;
+  unsigned long long offset = 0;
+
+  for (size_t t = 0; t < num_threads; ++t) {
+    unsigned long long this_end = offset + chunk + (t < remainder ? 1 : 0);
+    tasks[t] = (bf_minmax_task_t){
+      .S_a = S_a, .S_b = S_b, .S_c = S_c, .S_d = S_d,
+      .C_a = C_a, .C_b = C_b, .C_c = C_c, .C_d = C_d,
+      .L = L, .U = U, .n_a = n_a, .n_b = n_b, .n_c = n_c, .n_d = n_d, .m = m,
+      .start = offset, .end = this_end
+    };
+    offset = this_end;
+    pthread_create(&threads[t], NULL, bf_minmax_worker, &tasks[t]);
+  }
+
+  *low = 1.0; *up = 0.0;
+  for (size_t t = 0; t < num_threads; ++t) {
+    pthread_join(threads[t], NULL);
+    if (tasks[t].low < *low) *low = tasks[t].low;
+    if (tasks[t].up > *up) *up = tasks[t].up;
+  }
+}
+
+/* ---- Adaptive wrappers ---- */
+
+void optimize_credal(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L,
+    double *U, size_t n_a, size_t n_b, size_t m, double *low, double *up, bool smp,
+    size_t num_threads) {
+  if (m <= BFCA_THRESHOLD) {
+    bf_parallel(S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, low, up, smp, num_threads);
+  } else {
+    size_t tries = BFCA_TRIES(m);
+    *low = bfca(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, BFCA_MINIMIZE, tries, smp);
+    if (smp)
+      *up = bfca(X, S_b, S_a, C_b, C_a, L, U, n_b, n_a, m, BFCA_MAXIMIZE, tries, smp);
+    else
+      *up = bfca(X, S_a, S_b, C_a, C_b, L, U, n_a, n_b, m, BFCA_MAXIMIZE, tries, smp);
+  }
+}
+
+void optimize_credal_minmax(double *X, bool *S_a, bool *S_b, bool *S_c, bool *S_d,
+    double *C_a, double *C_b, double *C_c, double *C_d, double *L, double *U,
+    size_t n_a, size_t n_b, size_t n_c, size_t n_d, size_t m, double *low, double *up,
+    size_t num_threads) {
+  if (m <= BFCA_THRESHOLD) {
+    bf_minmax_parallel(S_a, S_b, S_c, S_d, C_a, C_b, C_c, C_d, L, U,
+        n_a, n_b, n_c, n_d, m, low, up, num_threads);
+  } else {
+    size_t tries = BFCA_TRIES(m);
+    *low = bfca(X, S_a, S_d, C_a, C_d, L, U, n_a, n_d, m, BFCA_MINIMIZE, tries, false);
+    *up  = bfca(X, S_b, S_c, C_b, C_c, L, U, n_b, n_c, m, BFCA_MAXIMIZE, tries, false);
   }
 }

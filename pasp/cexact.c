@@ -1,4 +1,6 @@
 #include <math.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "cexact.h"
 
@@ -139,6 +141,7 @@ void compute_total_choice(void *data) {
   double *a = st->a, *b = st->b, *c = st->c, *d = st->d, p;
   array_bool_t (*Pn)[4] = st->Pn;
   array_double_t (*K)[4] = st->K;
+  bool owns_control = false;
 
   st->fail = true;
 
@@ -160,7 +163,19 @@ void compute_total_choice(void *data) {
   size_t Q_n = P->Q_n, Q_n_bytes = Q_n*sizeof(size_t);
   bool is_partial = P->sem, has_credal = P->CF_n;
 
-  if (!prepare_control(&C, P, theta, "0", false, NULL)) goto cleanup;
+  /* Use assumption-based solving if a reusable control is available. */
+  reuse_control_t *rc = st->reuse;
+  clingo_literal_t *assumptions = NULL;
+  size_t n_assumptions = 0;
+  if (rc) {
+    C = rc->C;
+    build_assumptions(rc, P, theta);
+    assumptions = rc->assumptions;
+    n_assumptions = rc->n_assumptions;
+  } else {
+    if (!prepare_control(&C, P, theta, "0", false, NULL)) goto cleanup;
+    owns_control = true;
+  }
 
   /* Zero-initialize counters and flags. */
   memset(cond_1, 0, Q_n); memset(cond_2, 0, Q_n);
@@ -173,8 +188,8 @@ void compute_total_choice(void *data) {
     clingo_solve_handle_t *handle;
     clingo_solve_result_bitset_t solve_ret;
     const clingo_model_t *M;
-    /* Get the solve handle. */
-    if (!clingo_control_solve(C, clingo_solve_mode_yield, NULL, 0, NULL, NULL, &handle))
+    /* Get the solve handle (with assumptions if reusing control). */
+    if (!clingo_control_solve(C, clingo_solve_mode_yield, assumptions, n_assumptions, NULL, NULL, &handle))
       goto solve_error;
     /* Iterate over all stable models. */
     for (m = 0; true; ++m) {
@@ -252,7 +267,7 @@ solve_cleanup:
 
   st->fail = false;
 cleanup:
-  clingo_control_free(C);
+  if (owns_control) clingo_control_free(C);
   pthread_mutex_lock(st->wakeup);
   st->busy_procs[st->pid] = false;
   pthread_cond_signal(st->avail);
@@ -267,6 +282,7 @@ void compute_total_choice_maxent(void *data) {
   total_choice_t *theta = &st->theta;
   size_t *count_q_e = st->count_q_e, *count_e = st->count_e;
   double *a = st->a, *b = st->b, p;
+  bool owns_control = false;
 
   st->fail = true;
 
@@ -286,7 +302,19 @@ void compute_total_choice_maxent(void *data) {
   size_t Q_n = P->Q_n, Q_n_bytes = Q_n*sizeof(size_t);
   bool is_partial = P->sem;
 
-  if (!prepare_control(&C, P, theta, "0", false, NULL)) goto cleanup;
+  /* Use assumption-based solving if a reusable control is available. */
+  reuse_control_t *rc = st->reuse;
+  clingo_literal_t *assumptions = NULL;
+  size_t n_assumptions = 0;
+  if (rc) {
+    C = rc->C;
+    build_assumptions(rc, P, theta);
+    assumptions = rc->assumptions;
+    n_assumptions = rc->n_assumptions;
+  } else {
+    if (!prepare_control(&C, P, theta, "0", false, NULL)) goto cleanup;
+    owns_control = true;
+  }
 
   memset(count_q_e, 0, Q_n_bytes);
   memset(count_e, 0, Q_n_bytes);
@@ -299,7 +327,7 @@ void compute_total_choice_maxent(void *data) {
     clingo_solve_result_bitset_t solve_ret;
     const clingo_model_t *M;
 
-    if (!clingo_control_solve(C, clingo_solve_mode_yield, NULL, 0, NULL, NULL, &handle))
+    if (!clingo_control_solve(C, clingo_solve_mode_yield, assumptions, n_assumptions, NULL, NULL, &handle))
       goto solve_error;
 
     for (m = 0; true; ++m) {
@@ -349,14 +377,14 @@ solve_cleanup:
 
   st->fail = false;
 cleanup:
-  clingo_control_free(C);
+  if (owns_control) clingo_control_free(C);
   pthread_mutex_lock(st->wakeup);
   st->busy_procs[st->pid] = false;
   pthread_cond_signal(st->avail);
   pthread_mutex_unlock(st->wakeup);
 }
 
-bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, bool quiet, bool status) {
+bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, bool quiet, bool status, bool verbose) {
   bool has_credal = P->CF_n > 0, has_neural = P->NR_n + P->NA_n > 0;
   double *a, *b, *c, *d = c = b = a = NULL;
   size_t Q_n = P->Q_n, i;
@@ -369,10 +397,14 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
   threadpool pool = thpool_init(num_procs);
   bool busy_procs[NUM_PROCS] = {0}, exact_num_ok, warn = false;
   storage_t S[NUM_PROCS] = {{0}};
+  reuse_control_t reuse_controls[NUM_PROCS];
+  bool use_reuse = false;
   pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER, wakeup = PTHREAD_MUTEX_INITIALIZER;
   pthread_cond_t avail = PTHREAD_COND_INITIALIZER;
   void (*compute_func)(void*) = psem ? compute_total_choice_maxent : compute_total_choice;
-  statusbar *bar = status ? statusbar_new("Querying") : NULL;
+  /* Verbose progress replaces the spinner — don't show both. */
+  statusbar *bar = (status && !verbose) ? statusbar_new("Querying") : NULL;
+  memset(reuse_controls, 0, sizeof(reuse_controls));
 
   if (!init_total_choice(&theta, total_choice_n, P)) goto cleanup;
 
@@ -385,6 +417,22 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
     if (!init_storage(&S[i], P, Pn, K, i, busy_procs, &mu, &wakeup, &avail, lstable_sat,
           total_choice_n, P->AD, P->AD_n))
       goto cleanup;
+
+  /* Try to set up assumption-based reusable controls (one per thread). */
+  if (can_reuse_control(P, lstable_sat)) {
+    use_reuse = true;
+    for (i = 0; i < num_procs; ++i) {
+      if (!init_reuse_control(&reuse_controls[i], P)) { use_reuse = false; break; }
+      S[i].reuse = &reuse_controls[i];
+    }
+    /* If any failed, clean up and fall back. */
+    if (!use_reuse) {
+      for (size_t j = 0; j < i; ++j) {
+        free_reuse_control(&reuse_controls[j]);
+        S[j].reuse = NULL;
+      }
+    }
+  }
 
   for (i = 0; i < P->NR_n; ++i)
     if (!update_pr_neural_rule(&P->NR[i])) goto cleanup;
@@ -403,6 +451,34 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
   double *I_d = R_data;
   bool skip_print;
   size_t i_map;
+
+  /* Compute total number of choices for verbose progress reporting. */
+  unsigned long long total_choices = 0, dispatched = 0;
+  struct timespec verbose_start = {0}, verbose_last_print = {0};
+  /* Use \r for interactive terminals (overwrites in place), \n for logs/pipes.
+   * Print verbose to stdout so it appears in Jupyter notebooks. */
+  FILE *vout = stdout;
+  bool verbose_tty = isatty(fileno(vout));
+  if (verbose) {
+    /* Total choices = 2^(PF_n + CF_n) * product(AD[i].n for i in 0..AD_n). */
+    total_choices = (total_choice_n > 0) ? (1ULL << total_choice_n) : 1;
+    for (i = 0; i < P->AD_n; ++i) total_choices *= P->AD[i].n;
+    for (i = 0; i < P->NA_n; ++i) total_choices *= P->NA[i].n * P->NA[i].o;
+    fwprintf(vout, L"[dpasp] %zu queries, %llu total choices, %zu threads%s\n",
+        Q_n, total_choices * data_stride, num_procs, use_reuse ? L" (assumption-based)" : L"");
+    fwprintf(vout, L"[dpasp] semantics: %s/%s\n",
+        P->sem == STABLE_SEMANTICS ? "stable" : P->sem == PARTIAL_SEMANTICS ? "partial" :
+        P->sem == LSTABLE_SEMANTICS ? "lstable" : "smproblog",
+        psem == MAXENT_SEMANTICS ? "maxent" : "credal");
+    if (P->CF_n) fwprintf(vout, L"[dpasp] %zu credal facts, %zu prob facts\n", P->CF_n, P->PF_n);
+    else fwprintf(vout, L"[dpasp] %zu prob facts\n", P->PF_n);
+    if (P->AD_n) fwprintf(vout, L"[dpasp] %zu annotated disjunctions\n", P->AD_n);
+    fwprintf(vout, L"[dpasp] enumerating...\n");
+    fflush(vout);
+    clock_gettime(CLOCK_MONOTONIC, &verbose_start);
+    verbose_last_print = verbose_start;
+  }
+
   /*quiet = quiet || (data_stride > 10);*/
   for (size_t ds = 0; ds < data_stride; ++ds) {
     do {
@@ -410,11 +486,51 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
         if (!dispatch_job(&theta, &wakeup, busy_procs, S, num_procs, pool, &avail, compute_func))
           goto cleanup;
         if (bar) statusbar_inc(bar);
+        if (verbose) {
+          ++dispatched;
+          /* Print progress every ~2 seconds using a cheap modular check
+           * followed by a time check to avoid calling clock_gettime on every dispatch.
+           * Also print on the first 64th dispatch so fast jobs get at least one line. */
+          if ((dispatched & 0x3F) == 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double since_print = (now.tv_sec - verbose_last_print.tv_sec)
+                + (now.tv_nsec - verbose_last_print.tv_nsec) * 1e-9;
+            if (since_print >= 2.0 || dispatched == 64) {
+              double elapsed = (now.tv_sec - verbose_start.tv_sec)
+                  + (now.tv_nsec - verbose_start.tv_nsec) * 1e-9;
+              unsigned long long total = total_choices * data_stride;
+              double pct = 100.0 * dispatched / total;
+              double rate = dispatched / (elapsed > 0 ? elapsed : 0.001);
+              double eta = (total - dispatched) / (rate > 0 ? rate : 1);
+              fwprintf(vout, verbose_tty
+                  ? L"\r[dpasp] %llu/%llu (%.1f%%) | %.0f choices/s | ETA %.0fs   "
+                  : L"[dpasp] %llu/%llu (%.1f%%) | %.0f choices/s | ETA %.0fs\n",
+                  dispatched, total, pct, rate, eta);
+              fflush(vout);
+              verbose_last_print = now;
+            }
+          }
+        }
       } while (incr_total_choice_ad(&theta, P));
       /* Check for signals. */
       if (PyErr_CheckSignals()) goto cleanup;
     } while (incr_total_choice(&theta));
+    if (verbose) {
+      if (verbose_tty) fwprintf(vout, L"\n");
+      fwprintf(vout, L"[dpasp] waiting for %zu threads to finish...\n", num_procs);
+      fflush(vout);
+    }
     thpool_wait(pool);
+    if (verbose) {
+      fwprintf(vout, L"[dpasp] all threads done, computing results...\n");
+      fflush(vout);
+    }
+
+    if (verbose && data_stride > 1) {
+      fwprintf(vout, L"[dpasp] batch %zu/%zu done\n", ds+1, data_stride);
+      fflush(vout);
+    }
 
     for (i = 0; i < num_procs; ++i) warn |= S[i].warn;
 
@@ -440,6 +556,11 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
     i_map = 0;
 #define SKIP_THRESHOLD 1
     skip_print = quiet || ((ds > SKIP_THRESHOLD) && (ds < data_stride-SKIP_THRESHOLD-1));
+    if (verbose && has_credal) {
+      fwprintf(vout, L"[dpasp] optimizing credal bounds for %zu queries (m=%zu, %s, %zu threads)...\n",
+          Q_n, P->CF_n, P->CF_n <= BFCA_THRESHOLD ? "exact 2^m" : "approx bfca", num_procs);
+      fflush(vout);
+    }
     for (i = 0; i < Q_n; ++i) {
       size_t i_l = i*sem_stride;
       size_t i_u = i_l+1;
@@ -448,21 +569,37 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
       if (has_credal) {
         if (P->Q[i].E_n == 0) {
           double _a, _b;
-          bf(X, Pn[i][0].d, Pn[i][1].d, K[i][0].d, K[i][1].d, L_CF, U_CF, K[i][0].n, K[i][1].n,
-              P->CF_n, &_a, &_b, true);
+          struct timespec _q_start, _q_end;
+          if (verbose) {
+            fwprintf(vout, L"[dpasp]   query %zu/%zu: n_a=%zu n_b=%zu (%.1fB ops) ... ",
+                i+1, Q_n, K[i][0].n, K[i][1].n,
+                (double)(1ULL << P->CF_n) * (K[i][0].n + K[i][1].n) * P->CF_n / 1e9);
+            fflush(vout);
+            clock_gettime(CLOCK_MONOTONIC, &_q_start);
+          }
+          optimize_credal(X, Pn[i][0].d, Pn[i][1].d, K[i][0].d, K[i][1].d, L_CF, U_CF,
+              K[i][0].n, K[i][1].n, P->CF_n, &_a, &_b, true, num_procs);
+          if (verbose) {
+            clock_gettime(CLOCK_MONOTONIC, &_q_end);
+            double _q_elapsed = (_q_end.tv_sec - _q_start.tv_sec)
+                + (_q_end.tv_nsec - _q_start.tv_nsec) * 1e-9;
+            fwprintf(vout, L"%.1fs\n", _q_elapsed);
+            fflush(vout);
+          }
           I_d[i_l] = _a, I_d[i_u] = _b;
         } else {
           size_t _a = K[i][0].n, _b = K[i][1].n, _c = K[i][2].n, _d = K[i][3].n;
           if (_b + _d == 0) {
-            fputws(L"Fail: ℙ(E) = 0!\n", stdout);
+            fputws(L"Fail: ℙ(E) = 0!\n", stderr);
             I_d[i_l] = -INFINITY, I_d[i_u] = INFINITY;
           } else {
             if ((_b + _c == 0) && (_d > 0)) I_d[i_l] = 0, I_d[i_u] = 0;
             else if ((_a + _d == 0) && (_b > 0)) I_d[i_l] = 1, I_d[i_u] = 1;
             else {
               double min, max;
-              bf_minmax(X, Pn[i][0].d, Pn[i][1].d, Pn[i][2].d, Pn[i][3].d, K[i][0].d, K[i][1].d,
-                  K[i][2].d, K[i][3].d, L_CF, U_CF, _a, _b, _c, _d, P->CF_n, &min, &max);
+              optimize_credal_minmax(X, Pn[i][0].d, Pn[i][1].d, Pn[i][2].d, Pn[i][3].d,
+                  K[i][0].d, K[i][1].d, K[i][2].d, K[i][3].d, L_CF, U_CF, _a, _b, _c, _d,
+                  P->CF_n, &min, &max, num_procs);
               I_d[i_l] = min, I_d[i_u] = max;
             }
           }
@@ -478,7 +615,7 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
           if (P->Q[i].E_n == 0) I_d[i_l] = _a, I_d[i_u] = _b;
           else {
             if (_b + _d == 0) {
-              fputws(L"Fail: ℙ(E) = 0!\n", stdout);
+              fputws(L"Fail: ℙ(E) = 0!\n", stderr);
               I_d[i_l] = -INFINITY, I_d[i_u] = INFINITY;
             } else {
               if ((_b + _c == 0) && (_d > 0)) I_d[i_l] = 0, I_d[i_u] = 0;
@@ -517,8 +654,19 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
     }
   }
 
+  if (verbose) {
+    struct timespec verbose_end;
+    clock_gettime(CLOCK_MONOTONIC, &verbose_end);
+    double total_elapsed = (verbose_end.tv_sec - verbose_start.tv_sec)
+        + (verbose_end.tv_nsec - verbose_start.tv_nsec) * 1e-9;
+    if (verbose_tty) fwprintf(vout, L"\n");
+    fwprintf(vout, L"[dpasp] done: %llu total choices in %.1fs (%.0f choices/s)\n",
+        dispatched, total_elapsed, dispatched / (total_elapsed > 0 ? total_elapsed : 0.001));
+    fflush(vout);
+  }
+
   if (warn)
-    fputws(L"Warning: found total choice with no model. Probabilities may be incorrect.\n", stdout);
+    fputws(L"Warning: found total choice with no model. Probabilities may be incorrect.\n", stderr);
 
   exact_num_ok = true;
 cleanup:
@@ -526,6 +674,8 @@ cleanup:
   free_total_choice_contents(&theta);
   pthread_mutex_destroy(&mu); pthread_mutex_destroy(&wakeup); pthread_cond_destroy(&avail);
   thpool_destroy(pool);
+  if (use_reuse)
+    for (i = 0; i < num_procs; ++i) free_reuse_control(&reuse_controls[i]);
   for (i = 0; i < num_procs; ++i) free_storage_contents(&S[i]);
   if (has_credal) {
     free(L_CF); free(U_CF); free(X);

@@ -33,6 +33,21 @@ double prob_total_choice_prob(program_t *P, total_choice_t *theta);
 double prob_total_choice_neural(program_t *P, total_choice_t *theta, size_t offset, bool train);
 double prob_total_choice_ground(array_prob_fact_t *PF, total_choice_t *theta);
 
+/* Pre-grounded Clingo control for assumption-based solving. */
+typedef struct {
+  clingo_control_t *C;
+  /* Literal IDs for PF, CF atoms (one per atom). */
+  clingo_literal_t *pf_lits;
+  clingo_literal_t *cf_lits;
+  /* Literal IDs for AD outcomes (flattened: ad_offsets[i] is start index for AD i). */
+  clingo_literal_t *ad_lits;
+  size_t *ad_offsets;
+  /* Total number of assumptions needed per solve call. */
+  size_t n_assumptions;
+  /* Pre-allocated assumptions buffer. */
+  clingo_literal_t *assumptions;
+} reuse_control_t;
+
 typedef struct {
   bool *cond_1, *cond_2, *cond_3, *cond_4;
   size_t *count_q_e, *count_e, *count_partial_q_e;
@@ -46,7 +61,15 @@ typedef struct {
   size_t pid;
   pthread_mutex_t *mu, *wakeup;
   pthread_cond_t *avail;
+  /* Reusable pre-grounded control (NULL if not applicable). */
+  reuse_control_t *reuse;
 } storage_t;
+
+bool init_reuse_control(reuse_control_t *rc, program_t *P);
+void free_reuse_control(reuse_control_t *rc);
+bool build_assumptions(reuse_control_t *rc, program_t *P, total_choice_t *theta);
+/* Returns true if assumption-based solving is possible for this program configuration. */
+bool can_reuse_control(program_t *P, bool lstable_sat);
 
 bool init_storage(storage_t *s, program_t *P, array_bool_t (*Pn)[4],
     array_double_t (*K)[4], size_t id, bool *busy_procs, pthread_mutex_t *mu,

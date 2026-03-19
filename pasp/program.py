@@ -430,7 +430,7 @@ class Program:
     if len(self.Q) + len(self.VQ) > 0:
       from exact import exact
       from approx import aseo
-      A = {"quiet": False, "status": True}
+      A = {"quiet": False, "status": True, "verbose": False}
       A.update(kwargs)
       # TODO: implement additional semantics for ASEO and remove the exact exception below.
       if ("psemantics" in self.directives) and (self.directives["inference"][0] == "exact"):
