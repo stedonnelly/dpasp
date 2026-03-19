@@ -28,9 +28,10 @@ torch = ["torch >= 1.13.1"]
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools_scm]
-# Version from git tags: v0.1.0 → 0.1.0, v0.1.0-dev1 → 0.1.0.dev1
-# Untagged commits get: 0.1.0.dev1+g1234567 (dev version with commit hash)
-version_scheme = "guess-next-dev"
+# Version from git tags: v0.1.0 → 0.1.0
+# Untagged commits after v0.1.0 get: 0.1.1.dev3+gabcdef (auto-bumped)
+# For TestPyPI dev releases, use tags like: v0.1.0rc1, v0.1.0rc2
+version_scheme = "post-release"
 local_scheme = "no-local-version"
 
 [project.urls]

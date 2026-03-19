@@ -7,7 +7,7 @@
 /* Threshold on m (number of credal facts) above which coordinate ascent (bfca) is used instead of
  * exhaustive brute-force (bf). bf is O(2^m) and exact; bfca is O(m * tries) and approximate.
  * When bf is used and num_threads > 1, the corner enumeration is parallelized across threads. */
-#define BFCA_THRESHOLD 20
+#define BFCA_THRESHOLD 15
 #define BFCA_TRIES(m) ((m) * 10)
 
 #define BFCA_MAXIMIZE -1
