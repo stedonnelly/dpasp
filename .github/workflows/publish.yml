@@ -76,7 +76,7 @@ jobs:
             LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64"
 
           # ---- macOS: build clingo from source ----
-          CIBW_BEFORE_ALL_MACOS: "brew install cmake && cd /tmp && curl -L https://github.com/potassco/clingo/archive/refs/tags/v5.7.1.tar.gz -o clingo.tar.gz && tar xzf clingo.tar.gz && cd clingo-5.7.1 && cmake -H. -Bbuild -DCMAKE_BUILD_TYPE=Release -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF -DCMAKE_INSTALL_PREFIX=/usr/local && sudo cmake --build build --target install -j$(sysctl -n hw.ncpu)"
+          CIBW_BEFORE_ALL_MACOS: "cd /tmp && curl -L https://github.com/potassco/clingo/archive/refs/tags/v5.7.1.tar.gz -o clingo.tar.gz && tar xzf clingo.tar.gz && cd clingo-5.7.1 && cmake -H. -Bbuild -DCMAKE_BUILD_TYPE=Release -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF -DCMAKE_INSTALL_PREFIX=/usr/local && sudo cmake --build build --target install -j$(sysctl -n hw.ncpu)"
 
           CIBW_ENVIRONMENT_MACOS: >
             CFLAGS="-I/usr/local/include"
