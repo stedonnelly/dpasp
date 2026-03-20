@@ -17,3 +17,10 @@ try:
     __version__ = version("pasp-plp")
 except Exception:
     __version__ = "unknown"
+
+# Pre-compile CUDA kernel if GPU available (cached after first run)
+try:
+    from .gpu_optimize import warmup as _gpu_warmup
+    _gpu_warmup()
+except Exception:
+    pass
