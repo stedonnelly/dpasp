@@ -18,9 +18,11 @@ try:
 except Exception:
     __version__ = "unknown"
 
-# Pre-compile CUDA kernel if GPU available (cached after first run)
+# Pre-compile CUDA kernel if GPU available (cached on disk after first run).
+# Runs in a background thread to avoid blocking import on cold JIT compilation.
 try:
     from .gpu_optimize import warmup as _gpu_warmup
-    _gpu_warmup()
+    import threading as _threading
+    _threading.Thread(target=_gpu_warmup, daemon=True).start()
 except Exception:
     pass

@@ -481,6 +481,19 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
     verbose_last_print = verbose_start;
   }
 
+  /* Check for GPU availability once before the main loop (not per data_stride). */
+  bool use_gpu = false;
+  if (has_credal) {
+    gpu_mod = PyImport_ImportModule("pasp.gpu_optimize");
+    if (gpu_mod) {
+      PyObject *py_avail = PyObject_CallMethod(gpu_mod, "is_gpu_available", NULL);
+      if (py_avail && PyObject_IsTrue(py_avail)) use_gpu = true;
+      Py_XDECREF(py_avail);
+    } else {
+      PyErr_Clear(); /* No gpu_optimize module — that's fine, use CPU. */
+    }
+  }
+
   /*quiet = quiet || (data_stride > 10);*/
   for (size_t ds = 0; ds < data_stride; ++ds) {
     do {
@@ -558,18 +571,6 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
     i_map = 0;
 #define SKIP_THRESHOLD 1
     skip_print = quiet || ((ds > SKIP_THRESHOLD) && (ds < data_stride-SKIP_THRESHOLD-1));
-    /* Check for GPU availability once before the query loop. */
-    bool use_gpu = false;
-    if (has_credal) {
-      gpu_mod = PyImport_ImportModule("pasp.gpu_optimize");
-      if (gpu_mod) {
-        PyObject *py_avail = PyObject_CallMethod(gpu_mod, "is_gpu_available", NULL);
-        if (py_avail && PyObject_IsTrue(py_avail)) use_gpu = true;
-        Py_XDECREF(py_avail);
-      } else {
-        PyErr_Clear(); /* No gpu_optimize module — that's fine, use CPU. */
-      }
-    }
     if (verbose && has_credal) {
       const char *method;
       if (use_gpu) {
@@ -606,27 +607,41 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
           /* Try GPU path first — pass raw pointers as ctypes-compatible integers. */
           if (use_gpu) {
             PyObject *result = PyObject_CallMethod(gpu_mod, "_gpu_optimize_smp_from_c",
-                "llllllnnl",
-                (long)(uintptr_t)(K[i][0].n > 0 ? Pn[i][0].d : NULL),
-                (long)(uintptr_t)(K[i][0].n > 0 ? K[i][0].d : NULL),
-                (long)(uintptr_t)(K[i][1].n > 0 ? Pn[i][1].d : NULL),
-                (long)(uintptr_t)(K[i][1].n > 0 ? K[i][1].d : NULL),
-                (long)(uintptr_t)L_CF,
-                (long)(uintptr_t)U_CF,
-                (Py_ssize_t)K[i][0].n, (Py_ssize_t)K[i][1].n, (long)P->CF_n);
+                "LLLLLLnnL",
+                (unsigned long long)(uintptr_t)(K[i][0].n > 0 ? Pn[i][0].d : NULL),
+                (unsigned long long)(uintptr_t)(K[i][0].n > 0 ? K[i][0].d : NULL),
+                (unsigned long long)(uintptr_t)(K[i][1].n > 0 ? Pn[i][1].d : NULL),
+                (unsigned long long)(uintptr_t)(K[i][1].n > 0 ? K[i][1].d : NULL),
+                (unsigned long long)(uintptr_t)L_CF,
+                (unsigned long long)(uintptr_t)U_CF,
+                (Py_ssize_t)K[i][0].n, (Py_ssize_t)K[i][1].n, (unsigned long long)P->CF_n);
             if (result && result != Py_None) {
               if (PyTuple_Check(result) && PyTuple_Size(result) == 2) {
                 _a = PyFloat_AsDouble(PyTuple_GetItem(result, 0));
                 _b = PyFloat_AsDouble(PyTuple_GetItem(result, 1));
                 gpu_ok = true;
               }
-            } else { PyErr_Clear(); }
+            } else {
+              if (PyErr_Occurred()) {
+                PyObject *ptype, *pvalue, *ptb;
+                PyErr_Fetch(&ptype, &pvalue, &ptb);
+                if (pvalue) {
+                  PyObject *str = PyObject_Str(pvalue);
+                  if (str) {
+                    fwprintf(vout, L"\n[dpasp] GPU smp error: %s\n", PyUnicode_AsUTF8(str));
+                    fflush(vout);
+                    Py_DECREF(str);
+                  }
+                }
+                Py_XDECREF(ptype); Py_XDECREF(pvalue); Py_XDECREF(ptb);
+              }
+            }
             Py_XDECREF(result);
           }
           /* Fall back to CPU if GPU unavailable or failed. */
           if (!gpu_ok) {
-            if (verbose && use_gpu)
-              fwprintf(vout, L"GPU call failed, falling back to CPU ... ");
+            if (use_gpu)
+              fwprintf(vout, L"[dpasp] GPU call failed, falling back to CPU\n");
             optimize_credal(X, Pn[i][0].d, Pn[i][1].d, K[i][0].d, K[i][1].d, L_CF, U_CF,
                 K[i][0].n, K[i][1].n, P->CF_n, &_a, &_b, true, num_procs);
           }
@@ -652,31 +667,45 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
               /* Try GPU for minmax — pass raw pointers as integers. */
               if (use_gpu) {
                 PyObject *result = PyObject_CallMethod(gpu_mod, "_gpu_optimize_minmax_from_c",
-                    "llllllllllnnnnl",
-                    (long)(uintptr_t)(_a > 0 ? Pn[i][0].d : NULL),
-                    (long)(uintptr_t)(_a > 0 ? K[i][0].d : NULL),
-                    (long)(uintptr_t)(_b > 0 ? Pn[i][1].d : NULL),
-                    (long)(uintptr_t)(_b > 0 ? K[i][1].d : NULL),
-                    (long)(uintptr_t)(_c > 0 ? Pn[i][2].d : NULL),
-                    (long)(uintptr_t)(_c > 0 ? K[i][2].d : NULL),
-                    (long)(uintptr_t)(_d > 0 ? Pn[i][3].d : NULL),
-                    (long)(uintptr_t)(_d > 0 ? K[i][3].d : NULL),
-                    (long)(uintptr_t)L_CF,
-                    (long)(uintptr_t)U_CF,
+                    "LLLLLLLLLLnnnnL",
+                    (unsigned long long)(uintptr_t)(_a > 0 ? Pn[i][0].d : NULL),
+                    (unsigned long long)(uintptr_t)(_a > 0 ? K[i][0].d : NULL),
+                    (unsigned long long)(uintptr_t)(_b > 0 ? Pn[i][1].d : NULL),
+                    (unsigned long long)(uintptr_t)(_b > 0 ? K[i][1].d : NULL),
+                    (unsigned long long)(uintptr_t)(_c > 0 ? Pn[i][2].d : NULL),
+                    (unsigned long long)(uintptr_t)(_c > 0 ? K[i][2].d : NULL),
+                    (unsigned long long)(uintptr_t)(_d > 0 ? Pn[i][3].d : NULL),
+                    (unsigned long long)(uintptr_t)(_d > 0 ? K[i][3].d : NULL),
+                    (unsigned long long)(uintptr_t)L_CF,
+                    (unsigned long long)(uintptr_t)U_CF,
                     (Py_ssize_t)_a, (Py_ssize_t)_b, (Py_ssize_t)_c, (Py_ssize_t)_d,
-                    (long)P->CF_n);
+                    (unsigned long long)P->CF_n);
                 if (result && result != Py_None) {
                   if (PyTuple_Check(result) && PyTuple_Size(result) == 2) {
                     min = PyFloat_AsDouble(PyTuple_GetItem(result, 0));
                     max = PyFloat_AsDouble(PyTuple_GetItem(result, 1));
                     gpu_ok = true;
                   }
-                } else { PyErr_Clear(); }
+                } else {
+                  if (PyErr_Occurred()) {
+                    PyObject *ptype, *pvalue, *ptb;
+                    PyErr_Fetch(&ptype, &pvalue, &ptb);
+                    if (pvalue) {
+                      PyObject *str = PyObject_Str(pvalue);
+                      if (str) {
+                        fwprintf(vout, L"\n[dpasp] GPU minmax error: %s\n", PyUnicode_AsUTF8(str));
+                        fflush(vout);
+                        Py_DECREF(str);
+                      }
+                    }
+                    Py_XDECREF(ptype); Py_XDECREF(pvalue); Py_XDECREF(ptb);
+                  }
+                }
                 Py_XDECREF(result);
               }
               if (!gpu_ok) {
-                if (verbose && use_gpu)
-                  fwprintf(vout, L"GPU call failed, falling back to CPU ... ");
+                if (use_gpu)
+                  fwprintf(vout, L"[dpasp] GPU call failed, falling back to CPU\n");
                 optimize_credal_minmax(X, Pn[i][0].d, Pn[i][1].d, Pn[i][2].d, Pn[i][3].d,
                     K[i][0].d, K[i][1].d, K[i][2].d, K[i][3].d, L_CF, U_CF, _a, _b, _c, _d,
                     P->CF_n, &min, &max, num_procs);

@@ -15,6 +15,7 @@ class PaspTest(unittest.TestCase):
       return self.assertTrue(np.all(v := np.isclose(X, Y, **kwargs)), msg=f"{X} {Y} {v}")
     self.assertEqual(len(X), len(Y))
     if Z is not None: self.assertEqual(len(Y), len(Z))
+    # places=5 (1e-5 tolerance) to accommodate float32 GPU computation results
     for x, y in zip(X, Y): self.assertAlmostEqual(x, y, places=5)
     if Z is not None:
       for y, z in zip(Y, Z): self.assertAlmostEqual(y, z)
