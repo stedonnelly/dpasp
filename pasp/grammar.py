@@ -5,14 +5,12 @@ from .program import ProbFact, Query, VarQuery, ProbRule, Program, CredalFact, u
   Semantics, Data
 from .program import AnnotatedDisjunction, NeuralRule, NeuralAD, unique_pgrule_id
 
-_parse_term_cache = {}
+import functools
+
+@functools.lru_cache(maxsize=8192)
 def _cached_parse_term_rep(s: str) -> int:
   "Cached version of clingo.parse_term(s)._rep to avoid redundant parsing."
-  r = _parse_term_cache.get(s)
-  if r is None:
-    r = clingo.parse_term(s)._rep
-    _parse_term_cache[s] = r
-  return r
+  return clingo.parse_term(s)._rep
 
 def read(*files: str, G: lark.Lark = None, from_str: bool = False, start = "plp") -> lark.Tree:
   "Read all `files` and parse them with grammar `G`, returning a single `lark.Tree`."
