@@ -10,6 +10,9 @@
 #define BFCA_THRESHOLD 20
 #define BFCA_TRIES(m) ((m) * 10)
 
+/* Maximum supported m for stack-allocated X arrays in brute-force workers. */
+#define BFCA_MAX_M 64
+
 #define BFCA_MAXIMIZE -1
 #define BFCA_MINIMIZE 1
 

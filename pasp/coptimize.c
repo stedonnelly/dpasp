@@ -1,5 +1,6 @@
 #include "coptimize.h"
 #include <pthread.h>
+#include <stdio.h>
 
 /* The polynomial to evaluate, where X are the variables, S are the signs of each factor, C are the
  * coefficients, n are the number of terms and m are the number of variables. For example, the
@@ -31,7 +32,15 @@ double f(double *X, bool *S, double *C, size_t n, size_t m) {
   return s;
 }
 
-#define BFCA_MAX_M 64
+/* Simple xorshift64 PRNG — fast, no global state, adequate for random restarts. */
+static unsigned long long xorshift64(unsigned long long *state) {
+  unsigned long long x = *state;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  *state = x;
+  return x;
+}
 
 /* ---- Parallel brute-force infrastructure ---- */
 
@@ -106,10 +115,12 @@ double bfca(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L
     size_t n_a, size_t n_b, size_t m, int maxmin, size_t tries, bool smp) {
   double est, lest, best = 1;
   double a_l, a_u, b_l, b_u, l, u;
-  size_t i, t, r;
+  size_t i, t;
+  unsigned long long rng_state = (unsigned long long)rand() ^ 0x5DEECE66DULL;
+  unsigned long long k_mask = (m >= 64) ? ~0ULL : (1ULL << m) - 1;
   for (t = 0; t < tries; ++t) {
-    r = rand() % (1 << m);
-    for (i = 0; i < m; ++i) X[i] = ((r >> i) % 2) ? L[i] : U[i];
+    unsigned long long r = xorshift64(&rng_state) & k_mask;
+    for (i = 0; i < m; ++i) X[i] = ((r >> i) & 1) ? L[i] : U[i];
     est = 0;
     lest = -1;
     while (est > lest) {
@@ -153,9 +164,9 @@ void bf(double *X, bool *S_a, bool *S_b, double *C_a, double *C_b, double *L, do
   double a, b, y;
 
   *low = 1.0; *up = 0.0;
-  k = 1 << m;
+  k = 1ULL << m;
   for (i = 0; i < k; ++i) {
-    for (j = 0; j < m; ++j) X[j] = ((i >> j) % 2) ? L[j] : U[j];
+    for (j = 0; j < m; ++j) X[j] = ((i >> j) & 1) ? L[j] : U[j];
     a = f(X, S_a, C_a, n_a, m);
     b = f(X, S_b, C_b, n_b, m);
     if (smp) {
@@ -178,9 +189,9 @@ void bf_minmax(double *X, bool *S_a, bool *S_b, bool* S_c, bool* S_d, double *C_
   double a, b, c, d, y, z;
 
   *low = 1.0; *up = 0.0;
-  k = 1 << m;
+  k = 1ULL << m;
   for (i = 0; i < k; ++i) {
-    for (j = 0; j < m; ++j) X[j] = ((i >> j) % 2) ? L[j] : U[j];
+    for (j = 0; j < m; ++j) X[j] = ((i >> j) & 1) ? L[j] : U[j];
     a = f(X, S_a, C_a, n_a, m);
     b = f(X, S_b, C_b, n_b, m);
     c = f(X, S_c, C_c, n_c, m);
@@ -213,6 +224,7 @@ static void bf_parallel(bool *S_a, bool *S_b, double *C_a, double *C_b, double *
   unsigned long long remainder = k % num_threads;
   unsigned long long offset = 0;
 
+  size_t launched = 0;
   for (size_t t = 0; t < num_threads; ++t) {
     unsigned long long this_end = offset + chunk + (t < remainder ? 1 : 0);
     tasks[t] = (bf_task_t){
@@ -221,12 +233,17 @@ static void bf_parallel(bool *S_a, bool *S_b, double *C_a, double *C_b, double *
       .start = offset, .end = this_end, .smp = smp
     };
     offset = this_end;
-    pthread_create(&threads[t], NULL, bf_worker, &tasks[t]);
+    if (pthread_create(&threads[t], NULL, bf_worker, &tasks[t]) != 0) {
+      /* Thread creation failed — run remaining work in the main thread. */
+      bf_worker(&tasks[t]);
+    } else {
+      ++launched;
+    }
   }
 
   *low = 1.0; *up = 0.0;
   for (size_t t = 0; t < num_threads; ++t) {
-    pthread_join(threads[t], NULL);
+    if (t < launched) pthread_join(threads[t], NULL);
     if (tasks[t].low < *low) *low = tasks[t].low;
     if (tasks[t].up > *up) *up = tasks[t].up;
   }
@@ -251,6 +268,7 @@ static void bf_minmax_parallel(bool *S_a, bool *S_b, bool *S_c, bool *S_d,
   unsigned long long remainder = k % num_threads;
   unsigned long long offset = 0;
 
+  size_t launched = 0;
   for (size_t t = 0; t < num_threads; ++t) {
     unsigned long long this_end = offset + chunk + (t < remainder ? 1 : 0);
     tasks[t] = (bf_minmax_task_t){
@@ -260,12 +278,16 @@ static void bf_minmax_parallel(bool *S_a, bool *S_b, bool *S_c, bool *S_d,
       .start = offset, .end = this_end
     };
     offset = this_end;
-    pthread_create(&threads[t], NULL, bf_minmax_worker, &tasks[t]);
+    if (pthread_create(&threads[t], NULL, bf_minmax_worker, &tasks[t]) != 0) {
+      bf_minmax_worker(&tasks[t]);
+    } else {
+      ++launched;
+    }
   }
 
   *low = 1.0; *up = 0.0;
   for (size_t t = 0; t < num_threads; ++t) {
-    pthread_join(threads[t], NULL);
+    if (t < launched) pthread_join(threads[t], NULL);
     if (tasks[t].low < *low) *low = tasks[t].low;
     if (tasks[t].up > *up) *up = tasks[t].up;
   }
