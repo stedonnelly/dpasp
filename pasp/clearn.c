@@ -50,11 +50,12 @@ void compute_fixpoint(program_t *P, prob_storage_t *Q, size_t N, double eta,
   for (size_t i_o = 0; i_o < O->n; ++i_o) {
     prob_obs_storage_t *W = &Q->P[i_o];
     int c = (int) *((int*) PyArray_GETPTR1(obs_counts, i_o));
+    double c_inv_o = c / W->o;
     /* Update probabilistic facts. */
     for (size_t i_pf = 0; i_pf < Q->n; ++i_pf) {
       /* P(t = i, O) = W->F[i_pf][1] */
       /* P(O)        = W->o          */
-      P->PF[Q->I_F[i_pf]].p += c*(W->F[i_pf][1]/W->o);
+      P->PF[Q->I_F[i_pf]].p += c_inv_o*W->F[i_pf][1];
     }
     /* Update annotated disjunctions. */
     for (size_t i_ad = 0; i_ad < Q->m; ++i_ad) {
@@ -62,11 +63,11 @@ void compute_fixpoint(program_t *P, prob_storage_t *Q, size_t N, double eta,
       /* P(O)        = W->o          */
       annot_disj_t *AD = &P->AD[Q->I_A[i_ad]];
       for (size_t j = 0; j < AD->n; ++j)
-        AD->P[j] += c*(W->A[i_ad][j]/W->o);
+        AD->P[j] += c_inv_o*W->A[i_ad][j];
     }
     /* Update probabilistic rules. */
     for (size_t i_pr = 0; i_pr < Q->pr; ++i_pr)
-      P->PR[Q->I_PR[i_pr]].p += c*(W->R[i_pr][1]/W->o);
+      P->PR[Q->I_PR[i_pr]].p += c_inv_o*W->R[i_pr][1];
   }
 
   /* Divide probabilistic facts by the number of observations N. */
@@ -87,19 +88,22 @@ void compute_lagrange(program_t *P, prob_storage_t *Q, size_t N, double eta,
   for (size_t i_o = 0; i_o < O->n; ++i_o) {
     prob_obs_storage_t *W = &Q->P[i_o];
     int c = (int) *((int*) PyArray_GETPTR1(obs_counts, i_o));
+    double eta_c_inv_o = eta*c/W->o;
+    double eta_c_half_inv_o = eta_c_inv_o*0.5;
 
     /* Update probabilistic facts. */
     for (size_t i_pf = 0; i_pf < Q->n; ++i_pf)
-      P->PF[Q->I_F[i_pf]].p += eta*c*(((W->F[i_pf][1] - W->F[i_pf][0])*0.5)/W->o);
+      P->PF[Q->I_F[i_pf]].p += eta_c_half_inv_o*(W->F[i_pf][1] - W->F[i_pf][0]);
     /* Update probabilistic rules with shared parameters. */
     for (size_t i_pr = 0; i_pr < Q->pr; ++i_pr)
-      P->PR[Q->I_PR[i_pr]].p += eta*c*(((W->R[i_pr][1] - W->R[i_pr][0])*0.5)/W->o);
+      P->PR[Q->I_PR[i_pr]].p += eta_c_half_inv_o*(W->R[i_pr][1] - W->R[i_pr][0]);
     /* Update annotated disjunctions. */
     for (size_t i_ad = 0; i_ad < Q->m; ++i_ad) {
       annot_disj_t *AD = &P->AD[Q->I_A[i_ad]];
       double dP = 0.0;
       for (size_t j = 0; j < AD->n; ++j) dP += W->A[i_ad][j];
-      for (size_t j = 0; j < AD->n; ++j) AD->P[j] += eta*c*((W->A[i_ad][j] - dP/AD->n)/W->o);
+      double inv_n = 1.0/AD->n;
+      for (size_t j = 0; j < AD->n; ++j) AD->P[j] += eta_c_inv_o*(W->A[i_ad][j] - dP*inv_n);
     }
     /* Accumulate neural rule derivatives. */
     for (size_t i_nr = 0; i_nr < Q->nr; ++i_nr) {
@@ -107,19 +111,20 @@ void compute_lagrange(program_t *P, prob_storage_t *Q, size_t N, double eta,
       for (size_t g = 0; g < R->n; ++g)
         for (size_t o = 0; o < R->o; ++o) {
           size_t u = g*2*R->o + o*2;
-          P->NR[Q->I_NR[i_nr]].dw[i_o*R->o + g*R->o*P->batch + o] = eta*c*((W->NR[i_nr][u+1] - W->NR[i_nr][u])*0.5)/W->o;
+          P->NR[Q->I_NR[i_nr]].dw[i_o*R->o + g*R->o*P->batch + o] = eta_c_half_inv_o*(W->NR[i_nr][u+1] - W->NR[i_nr][u]);
         }
     }
     /* Accumulate neural annotated disjunction derivatives. */
     for (size_t i_na = 0; i_na < Q->na; ++i_na) {
       neural_annot_disj_t *A = &P->NA[Q->I_NA[i_na]];
+      double inv_v = 1.0/A->v;
       for (size_t g = 0; g < A->n; ++g)
         for (size_t o = 0; o < A->o; ++o) {
           double *derivs = W->NA[i_na] + g*A->v*A->o + o*A->v;
           size_t offset = i_o*A->o*A->v + g*A->o*A->v*P->batch + o*A->v;
           double dP = 0.0;
           for (size_t j = 0; j < A->v; ++j) dP += derivs[j];
-          for (size_t j = 0; j < A->v; ++j) A->dw[offset + j] = eta*c*(derivs[j] - dP/A->v)/W->o;
+          for (size_t j = 0; j < A->v; ++j) A->dw[offset + j] = eta_c_inv_o*(derivs[j] - dP*inv_v);
         }
     }
   }
@@ -131,16 +136,17 @@ void compute_neurasp(program_t *P, prob_storage_t *Q, size_t N, double eta,
   for (size_t i_o = 0; i_o < O->n; ++i_o) {
     prob_obs_storage_t *W = &Q->P[i_o];
     int c = (int) *((int*) PyArray_GETPTR1(obs_counts, i_o));
+    double eta_c_inv_o = eta*c/W->o;
 
     /* Update probabilistic facts. */
     for (size_t i_pf = 0; i_pf < Q->n; ++i_pf)
-      P->PF[Q->I_F[i_pf]].p += eta*c*((W->F[i_pf][1] - W->F[i_pf][0])/W->o);
+      P->PF[Q->I_F[i_pf]].p += eta_c_inv_o*(W->F[i_pf][1] - W->F[i_pf][0]);
     /* Update annotated disjunctions. */
     for (size_t i_ad = 0; i_ad < Q->m; ++i_ad) {
       annot_disj_t *AD = &P->AD[Q->I_A[i_ad]];
       double dP = 0.0;
       for (size_t j = 0; j < AD->n; ++j) dP += W->A[i_ad][j];
-      for (size_t j = 0; j < AD->n; ++j) AD->P[j] += eta*c*((2*W->A[i_ad][j] - dP)/W->o);
+      for (size_t j = 0; j < AD->n; ++j) AD->P[j] += eta_c_inv_o*(2*W->A[i_ad][j] - dP);
     }
   }
 }

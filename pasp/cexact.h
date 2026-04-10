@@ -7,7 +7,7 @@
 #include "cstorage.h"
 
 /* Compute (exactly) query probabilities by exhaustively enumerating all models. */
-bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, bool quiet, bool status);
+bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, bool quiet, bool status, bool verbose);
 /* Count number of models for each learnable probabilistic fact or annotated disjunction. */
 bool count_models(program_t *P, bool lstable_sat, count_storage_t *C);
 

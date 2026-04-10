@@ -2,6 +2,130 @@
 #include "cutils.h"
 #include <string.h>
 
+/* ---- Assumption-based reusable Clingo control ---- */
+
+bool can_reuse_control(program_t *P, bool lstable_sat) {
+  /* Assumption-based solving is only safe when the program is the same for all total choices.
+   * This excludes: lstable (switches to P->stable), smproblog (special handling),
+   * neural rules/ADs (require per-choice backend rule additions). */
+  if (P->NR_n > 0 || P->NA_n > 0) return false;
+  if (P->sem == LSTABLE_SEMANTICS && lstable_sat) return false;
+  if (P->sem == SMPROBLOG_SEMANTICS) return false;
+  return true;
+}
+
+static bool _lookup_literal(clingo_control_t *C, clingo_symbol_t sym, clingo_literal_t *lit) {
+  const clingo_symbolic_atoms_t *atoms;
+  clingo_symbolic_atom_iterator_t it;
+  bool found;
+  if (!clingo_control_symbolic_atoms(C, &atoms)) return false;
+  if (!clingo_symbolic_atoms_find(atoms, sym, &it)) return false;
+  if (!clingo_symbolic_atoms_is_valid(atoms, it, &found)) return false;
+  if (!found) { *lit = 0; return true; }
+  if (!clingo_symbolic_atoms_literal(atoms, it, lit)) return false;
+  return true;
+}
+
+bool init_reuse_control(reuse_control_t *rc, program_t *P) {
+  memset(rc, 0, sizeof(*rc));
+
+  /* Calculate total assumptions needed: PF + CF + one per AD (selected outcome). */
+  size_t n_ad_total = 0;
+  for (size_t i = 0; i < P->AD_n; ++i) n_ad_total += P->AD[i].n;
+  rc->n_assumptions = P->PF_n + P->CF_n + n_ad_total;
+
+  /* Create and ground control with all atoms as choices. */
+  if (!clingo_control_new(NULL, 0, undef_atom_ignore, NULL, 20, &rc->C)) return false;
+  if (!setup_config(rc->C, "0", false)) goto error;
+  if (!clingo_control_add(rc->C, "base", NULL, 0, P->P)) goto error;
+  if (P->gr_P[0])
+    if (!clingo_control_add(rc->C, "base", NULL, 0, P->gr_P)) goto error;
+  if (!add_all_atoms_as_choice(rc->C, P)) goto error;
+  if (!clingo_control_ground(rc->C, GROUND_DEFAULT_PARTS, 1, NULL, NULL)) goto error;
+
+  /* Allocate literal arrays. */
+  if (P->PF_n > 0) {
+    rc->pf_lits = (clingo_literal_t*) malloc(P->PF_n * sizeof(clingo_literal_t));
+    if (!rc->pf_lits) goto error;
+  }
+  if (P->CF_n > 0) {
+    rc->cf_lits = (clingo_literal_t*) malloc(P->CF_n * sizeof(clingo_literal_t));
+    if (!rc->cf_lits) goto error;
+  }
+  if (n_ad_total > 0) {
+    rc->ad_lits = (clingo_literal_t*) malloc(n_ad_total * sizeof(clingo_literal_t));
+    if (!rc->ad_lits) goto error;
+  }
+  if (P->AD_n > 0) {
+    rc->ad_offsets = (size_t*) malloc(P->AD_n * sizeof(size_t));
+    if (!rc->ad_offsets) goto error;
+  }
+  rc->assumptions = (clingo_literal_t*) malloc(rc->n_assumptions * sizeof(clingo_literal_t));
+  if (!rc->assumptions) goto error;
+
+  /* Look up literal IDs for all PF atoms. */
+  for (size_t i = 0; i < P->PF_n; ++i)
+    if (!_lookup_literal(rc->C, P->PF[i].cl_f, &rc->pf_lits[i])) goto error;
+  /* Look up literal IDs for all CF atoms. */
+  for (size_t i = 0; i < P->CF_n; ++i)
+    if (!_lookup_literal(rc->C, P->CF[i].cl_f, &rc->cf_lits[i])) goto error;
+  /* Look up literal IDs for all AD outcome atoms. */
+  {
+    size_t offset = 0;
+    for (size_t i = 0; i < P->AD_n; ++i) {
+      rc->ad_offsets[i] = offset;
+      for (size_t j = 0; j < P->AD[i].n; ++j) {
+        if (!_lookup_literal(rc->C, P->AD[i].cl_F[j], &rc->ad_lits[offset + j])) goto error;
+      }
+      offset += P->AD[i].n;
+    }
+  }
+
+  return true;
+error:
+  free_reuse_control(rc);
+  return false;
+}
+
+void free_reuse_control(reuse_control_t *rc) {
+  if (rc->C) { clingo_control_free(rc->C); rc->C = NULL; }
+  free(rc->pf_lits); rc->pf_lits = NULL;
+  free(rc->cf_lits); rc->cf_lits = NULL;
+  free(rc->ad_lits); rc->ad_lits = NULL;
+  free(rc->ad_offsets); rc->ad_offsets = NULL;
+  free(rc->assumptions); rc->assumptions = NULL;
+}
+
+bool build_assumptions(reuse_control_t *rc, program_t *P, total_choice_t *theta) {
+  size_t idx = 0;
+  /* CF atoms: positive if true in theta, negative if false. */
+  for (size_t i = 0; i < P->CF_n; ++i) {
+    clingo_literal_t lit = rc->cf_lits[i];
+    if (lit == 0) continue;
+    rc->assumptions[idx++] = CHOICE_IS_TRUE(theta, i) ? lit : -lit;
+  }
+  /* PF atoms: positive if true in theta, negative if false. */
+  for (size_t i = 0; i < P->PF_n; ++i) {
+    clingo_literal_t lit = rc->pf_lits[i];
+    if (lit == 0) continue;
+    rc->assumptions[idx++] = CHOICE_IS_TRUE(theta, i + P->CF_n) ? lit : -lit;
+  }
+  /* AD outcomes: assume the selected outcome positive, all others negative. */
+  for (size_t i = 0; i < P->AD_n; ++i) {
+    size_t offset = rc->ad_offsets[i];
+    uint8_t selected = theta->theta_ad[i];
+    for (size_t j = 0; j < P->AD[i].n; ++j) {
+      clingo_literal_t lit = rc->ad_lits[offset + j];
+      if (lit == 0) continue;
+      rc->assumptions[idx++] = (j == selected) ? lit : -lit;
+    }
+  }
+  rc->n_assumptions = idx;
+  return true;
+}
+
+/* ---- End assumption-based reusable Clingo control ---- */
+
 double prob_total_choice_prob(program_t *P, total_choice_t *theta) {
   prob_fact_t *PF = P->PF;
   size_t PF_n = P->PF_n, AD_n = P->AD_n, CF_n = P->CF_n;
@@ -11,8 +135,12 @@ double prob_total_choice_prob(program_t *P, total_choice_t *theta) {
   for (; i < PF_n; ++i) {
     t = bitvec_GET(&theta->pf, i + CF_n);
     p *= t*PF[i].p + (!t)*(1.0-PF[i].p);
+    if (p == 0.0) return 0.0;
   }
-  for (i = 0; i < AD_n; ++i) p *= P->AD[i].P[theta->theta_ad[i]];
+  for (i = 0; i < AD_n; ++i) {
+    p *= P->AD[i].P[theta->theta_ad[i]];
+    if (p == 0.0) return 0.0;
+  }
   return p;
 }
 double prob_total_choice_neural(program_t *P, total_choice_t *theta, size_t offset, bool train) {
@@ -21,19 +149,24 @@ double prob_total_choice_neural(program_t *P, total_choice_t *theta, size_t offs
   size_t m = train*P->batch + (!train)*P->m_test;
   for (size_t i = 0; i < P->NR_n; ++i) {
     float *prob = P->NR[i].P + offset*P->NR[i].o;
+    size_t stride = P->NR[i].o*m;
     for (size_t j = 0; j < P->NR[i].n; ++j)
       for (size_t o = 0; o < P->NR[i].o; ++o) {
         bool t = bitvec_GET(&theta->pf, r++);
-        double q = prob[j*P->NR[i].o*m+o];
+        double q = prob[j*stride+o];
         p *= t*q + (!t)*(1.0-q);
+        if (p == 0.0) return 0.0;
       }
   }
   r = P->AD_n;
   for (size_t i = 0; i < P->NA_n; ++i) {
     float *prob = P->NA[i].P + offset*P->NA[i].v*P->NA[i].o;
+    size_t vo = P->NA[i].v*P->NA[i].o;
     for (size_t j = 0; j < P->NA[i].n; ++j)
-      for (size_t o = 0; o < P->NA[i].o; ++o)
-        p *= prob[j*m*P->NA[i].v*P->NA[i].o + o*P->NA[i].v + theta->theta_ad[r++]];
+      for (size_t o = 0; o < P->NA[i].o; ++o) {
+        p *= prob[j*m*vo + o*P->NA[i].v + theta->theta_ad[r++]];
+        if (p == 0.0) return 0.0;
+      }
   }
   return p;
 }
@@ -46,6 +179,7 @@ double prob_total_choice_ground(array_prob_fact_t *PF, total_choice_t *theta) {
   for (size_t i = 0; i < PF->n; ++i) {
     t = bitvec_GET(&theta->pf, i);
     p *= t*PF->d[i].p + (!t)*(1.0-PF->d[i].p);
+    if (p == 0.0) return 0.0;
   }
   return p;
 }
@@ -57,6 +191,7 @@ bool init_storage(storage_t *s, program_t *P, array_bool_t (*Pn)[4],
   s->cond_1 = s->cond_2 = s->cond_3 = s->cond_4 = NULL;
   s->count_q_e = s->count_e = s->count_partial_q_e = NULL;
   s->a = s->b = s->c = s->d = NULL;
+  s->reuse = NULL;
   s->Pn = Pn; s->K = K; s->P = P;
   s->mu = mu; s->wakeup = wakeup; s->avail = avail;
   if (!setup_conds(&s->cond_1, &s->cond_2, &s->cond_3, &s->cond_4, P->Q_n*sizeof(bool))) goto error;
@@ -103,7 +238,7 @@ nomem:
   free(*cond_1); free(*cond_2);
   free(*cond_3); free(*cond_4);
   *cond_1 = *cond_2 = *cond_3 = *cond_4 = NULL;
-  goto nomem;
+  return false;
 }
 
 bool setup_counts(size_t **count_q_e, size_t **count_e, size_t **count_partial_q_e, size_t n) {
@@ -464,12 +599,9 @@ bool prepare_control_preground(clingo_control_t **C, program_t *P, total_choice_
 }
 
 bool atomic_ground(clingo_control_t *C, clingo_ground_callback_t gcb, void *gdata) {
-  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-  bool ok;
-  pthread_mutex_lock(&mu);
-  ok = clingo_control_ground(C, GROUND_DEFAULT_PARTS, 1, gcb, gdata);
-  pthread_mutex_unlock(&mu);
-  return ok;
+  /* No mutex needed: each thread operates on its own clingo_control_t instance.
+   * prepare_control() already calls clingo_control_ground() without a mutex. */
+  return clingo_control_ground(C, GROUND_DEFAULT_PARTS, 1, gcb, gdata);
 }
 
 bool prepare_control(clingo_control_t **C, program_t *P, total_choice_t *theta,
