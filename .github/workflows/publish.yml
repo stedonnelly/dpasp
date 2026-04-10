@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-22.04
     if: "!contains(github.ref, '-dev') && !contains(github.ref, 'rc')"
     environment:
-      name: pypi
+      name: pypi-release
       url: https://pypi.org/p/pasp-plp-uas
     permissions:
       id-token: write
