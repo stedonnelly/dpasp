@@ -27,10 +27,9 @@ jobs:
           pip install pygments-pasp
       - name: Add Python dependencies
         run: |
-          python -m pip install --upgrade pip setuptools build setuptools-scm pdoc
+          python -m pip install --upgrade pip setuptools build setuptools-scm pdoc numpy lark pandas
       - name: Build pasp
         run: |
-          python setup.py build_ext --build-lib pasp/
           python setup.py build_ext --inplace
       - name: Generate docs
         run: |
