@@ -116,49 +116,6 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Rename packages for TestPyPI
-        run: |
-          pip install wheel
-          cd dist
-
-          # Patch wheels: rename metadata inside the zip and the filename
-          for whl in *.whl; do
-            tmpdir=$(mktemp -d)
-            unzip -q "$whl" -d "$tmpdir"
-            # Rename the .dist-info directory
-            for di in "$tmpdir"/*.dist-info; do
-              mv "$di" "$(echo "$di" | sed 's/pasp_plp/pasp_plp_uas/g')"
-            done
-            # Patch Name field in METADATA and RECORD
-            find "$tmpdir" -name METADATA -exec sed -i 's/^Name: pasp-plp$/Name: pasp-plp-uas/' {} \;
-            find "$tmpdir" -name RECORD -exec sed -i 's/pasp_plp/pasp_plp_uas/g' {} \;
-            # Repack wheel
-            rm "$whl"
-            newname="$(echo "$whl" | sed 's/pasp_plp/pasp_plp_uas/g')"
-            (cd "$tmpdir" && zip -q -r "$OLDPWD/$newname" .)
-            rm -rf "$tmpdir"
-          done
-
-          # Patch sdist: rename metadata inside the tarball and the filename
-          for tgz in *.tar.gz; do
-            tmpdir=$(mktemp -d)
-            tar xzf "$tgz" -C "$tmpdir"
-            # Patch PKG-INFO and pyproject.toml inside the sdist
-            find "$tmpdir" -name PKG-INFO -exec sed -i 's/^Name: pasp-plp$/Name: pasp-plp-uas/' {} \;
-            find "$tmpdir" -name pyproject.toml -exec sed -i 's/name = "pasp-plp"/name = "pasp-plp-uas"/' {} \;
-            # Rename the top-level directory
-            for d in "$tmpdir"/pasp?plp*; do
-              mv "$d" "$(echo "$d" | sed 's/pasp.plp/pasp_plp_uas/g')"
-            done
-            rm "$tgz"
-            newname="$(echo "$tgz" | sed 's/pasp_plp/pasp_plp_uas/g')"
-            tar czf "$newname" -C "$tmpdir" .
-            rm -rf "$tmpdir"
-          done
-
-          echo "--- Final dist contents ---"
-          ls -la
-
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -171,7 +128,7 @@ jobs:
     if: "!contains(github.ref, '-dev') && !contains(github.ref, 'rc')"
     environment:
       name: pypi
-      url: https://pypi.org/p/pasp-plp
+      url: https://pypi.org/p/pasp-plp-uas
     permissions:
       id-token: write
     steps:

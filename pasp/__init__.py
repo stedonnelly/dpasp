@@ -14,7 +14,7 @@ import numpy as np
 
 try:
     from importlib.metadata import version
-    __version__ = version("pasp-plp")
+    __version__ = version("pasp-plp-uas")
 except Exception:
     __version__ = "unknown"
 
