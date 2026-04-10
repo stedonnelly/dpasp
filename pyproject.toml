@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pasp-plp"
-dynamic = ["version", "dependencies"]
+dynamic = ["version"]
 authors = [
   { name = "Renato Lui Geh", email = "renatogeh@gmail.com" },
 ]
@@ -20,12 +20,24 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 description = "Probabilistic Answer Set Programming"
+dependencies = [
+  "clingo >= 5.6.2",
+  "lark >= 1.1.5",
+  "numpy >= 1.23.5",
+  "pandas >= 1.5.3",
+  "torch >= 1.13.1",
+  "ninja",
+]
 
-[project.optional-dependencies]
-torch = ["torch >= 1.13.1", "ninja"]
+[project.scripts]
+pasp = "pasp.app:main"
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+[project.urls]
+Repository = "https://github.com/RenatoGeh/pasp"
+Issues = "https://github.com/RenatoGeh/pasp/issues"
+
+[tool.setuptools]
+packages = ["pasp"]
 
 [tool.setuptools_scm]
 # Version from git tags: v0.1.0 → 0.1.0
@@ -33,10 +45,3 @@ dependencies = {file = ["requirements.txt"]}
 # For TestPyPI dev releases, use tags like: v0.1.0rc1, v0.1.0rc2
 version_scheme = "post-release"
 local_scheme = "no-local-version"
-
-[project.urls]
-Repository = "https://github.com/RenatoGeh/pasp"
-Issues = "https://github.com/RenatoGeh/pasp/issues"
-
-[project.scripts]
-pasp = "pasp.app:main"
