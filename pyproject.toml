@@ -39,6 +39,12 @@ Issues = "https://github.com/RenatoGeh/pasp/issues"
 [tool.setuptools]
 packages = ["pasp"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
 [tool.setuptools_scm]
 # Version from git tags: v0.1.0 → 0.1.0
 # Untagged commits after v0.1.0 get: 0.1.1.dev3+gabcdef (auto-bumped)
