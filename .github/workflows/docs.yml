@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
           cache: "pip"
       - name: Add system dependencies
         run: |
@@ -27,7 +27,7 @@ jobs:
           pip install pygments-pasp
       - name: Add Python dependencies
         run: |
-          python -m pip install --upgrade pip setuptools build setuptools-scm pdoc numpy lark pandas
+          python -m pip install --upgrade pip setuptools build setuptools-scm pdoc numpy lark pandas clingo
       - name: Build pasp
         run: |
           python setup.py build_ext --inplace
