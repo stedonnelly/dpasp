@@ -404,8 +404,8 @@ bool exact_enum(program_t *P, double **R, bool lstable_sat, psemantics_t psem, b
   pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER, wakeup = PTHREAD_MUTEX_INITIALIZER;
   pthread_cond_t avail = PTHREAD_COND_INITIALIZER;
   void (*compute_func)(void*) = psem ? compute_total_choice_maxent : compute_total_choice;
-  /* Verbose progress replaces the spinner — don't show both. */
-  statusbar *bar = (status && !verbose) ? statusbar_new("Querying") : NULL;
+  /* Verbose progress replaces the spinner — don't show both. Quiet suppresses everything. */
+  statusbar *bar = (status && !verbose && !quiet) ? statusbar_new("Querying") : NULL;
   memset(reuse_controls, 0, sizeof(reuse_controls));
 
   if (!init_total_choice(&theta, total_choice_n, P)) goto cleanup;
