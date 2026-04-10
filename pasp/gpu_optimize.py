@@ -32,9 +32,20 @@ _fallback_log = []
 
 
 def _log_fallback(stage, msg):
-    """Record a GPU fallback reason for later diagnosis."""
+    """Record a GPU fallback reason for later diagnosis.
+
+    'init' and 'kernel' stages are silent by default (no GPU is normal in CI).
+    Runtime failures ('smp', 'minmax', 'batch') always print — those mean
+    the GPU was expected to work but didn't.
+
+    All entries are always recorded in _fallback_log for diagnose().
+    """
     _fallback_log.append((stage, msg))
-    print(f"[dpasp:gpu:{stage}] {msg}", flush=True)
+    # Always print runtime failures; init/kernel only with DPASP_GPU_DEBUG
+    if stage in ('smp', 'minmax', 'batch'):
+        print(f"[dpasp:gpu:{stage}] {msg}", flush=True)
+    elif os.environ.get('DPASP_GPU_DEBUG', '0') == '1':
+        print(f"[dpasp:gpu:{stage}] {msg}", flush=True)
 
 # Threshold for switching to tiled kernel (n terms).  When n exceeds this, global
 # memory traffic dominates — the tiled kernel uses shared memory to reduce it.

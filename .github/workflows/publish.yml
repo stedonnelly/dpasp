@@ -87,7 +87,7 @@ jobs:
             LDFLAGS="-L/usr/local/lib"
 
           # ---- Common: Python build deps ----
-          CIBW_BEFORE_BUILD: "pip install numpy 'setuptools>=65.6.3' 'packaging>=24.2' setuptools-scm"
+          CIBW_BEFORE_BUILD: "pip install numpy 'setuptools>=65.6.3,<77' setuptools-scm"
 
           # ---- Repair: bundle shared libs into wheel ----
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
