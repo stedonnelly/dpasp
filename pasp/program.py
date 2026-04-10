@@ -1,5 +1,6 @@
 import enum, types
 
+import numpy as np
 import clingo
 from clingo.symbol import Function
 
@@ -332,6 +333,28 @@ class VarQuery:
     return qs + ")"
   def __repr__(self) -> str: return self.__str__()
 
+class InferenceResult:
+  """Wraps inference output (numpy array) together with query metadata for convenient formatting."""
+
+  def __init__(self, data: np.ndarray, queries: list):
+    self.data = data
+    self.queries = queries
+
+  def __str__(self) -> str:
+    lines = []
+    for query, probs in zip(self.queries, self.data):
+      if probs.shape[-1] == 1:
+        lines.append(f"{query} = {probs[0]:.6f}")
+      else:
+        lines.append(f"{query} = [{probs[0]:.6f}, {probs[1]:.6f}]")
+    return "\n".join(lines)
+
+  def __repr__(self) -> str: return self.__str__()
+  def __getitem__(self, key): return self.data[key]
+  def __len__(self) -> int: return len(self.data)
+  def __iter__(self): return iter(self.data)
+  def __array__(self, dtype=None): return np.asarray(self.data, dtype=dtype)
+
 class Program:
   """
   A Probabilistic Logic Program (PLP) usually configures a triple `<P,PF,CF>`, where `P` is a logic
@@ -436,4 +459,7 @@ class Program:
       if ("psemantics" in self.directives) and (self.directives["inference"][0] == "exact"):
         A.update(self.directives["psemantics"])
       f = vars()[self.directives["inference"][0]]
-      return f(self, *self.directives["inference"][1], **A)
+      R = f(self, *self.directives["inference"][1], **A)
+      if R is not None:
+        return InferenceResult(R, self.Q)
+      return R

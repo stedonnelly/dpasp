@@ -5,7 +5,7 @@
 from .grammar import parse
 from exact import exact, count
 from ground import ground
-from .program import Program
+from .program import Program, InferenceResult
 from sample import sample
 from .wlearn import learn
 import approx
